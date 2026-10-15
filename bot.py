@@ -212,6 +212,7 @@ async def run_webhook():
             return web.Response(status=400, text="invalid update")
 
     server = web.Application(client_max_size=16 * 1024 * 1024)
+    server.router.add_get("/", lambda request: web.Response(text="Officium CV Bot is running"))
     server.router.add_post("/telegram", telegram_webhook)
     runner = web.AppRunner(server)
     await runner.setup()
