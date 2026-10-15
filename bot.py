@@ -38,7 +38,28 @@ db = sqlite3.connect(DB_PATH, check_same_thread=False)
 db.execute("""CREATE TABLE IF NOT EXISTS cv_jobs (
  id INTEGER PRIMARY KEY, user_id INTEGER, created_at TEXT, filename TEXT,
  jd TEXT, status TEXT, output_docx TEXT, output_pdf TEXT)""")
+# Persist only the active job description so webhook retries/restarts do not lose workflow state.
+db.execute("""CREATE TABLE IF NOT EXISTS active_workflows (
+ user_id INTEGER PRIMARY KEY, jd TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+# De-duplicate webhook deliveries from Telegram.
+db.execute("CREATE TABLE IF NOT EXISTS processed_updates (update_id INTEGER PRIMARY KEY, processed_at TEXT NOT NULL)")
 db.commit()
+
+def save_active_jd(user_id: int, jd: str):
+    db.execute(
+        "INSERT INTO active_workflows(user_id, jd, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET jd=excluded.jd, updated_at=excluded.updated_at",
+        (user_id, jd, datetime.now(timezone.utc).isoformat())
+    )
+    db.commit()
+
+def get_active_jd(user_id: int):
+    row = db.execute("SELECT jd FROM active_workflows WHERE user_id=?", (user_id,)).fetchone()
+    return row[0] if row else None
+
+def clear_active_jd(user_id: int):
+    db.execute("DELETE FROM active_workflows WHERE user_id=?", (user_id,))
+    db.commit()
 
 def extract_text(path: Path) -> str:
     if path.suffix.lower() == ".pdf":
@@ -147,6 +168,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
+    if update.effective_user:
+        clear_active_jd(update.effective_user.id)
     await update.message.reply_text("Current CV workflow cleared. Send /start to begin again.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -156,12 +179,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(msg) < 100:
         await update.message.reply_text("Please send the complete job description (ideally 100+ characters), or use /start to begin.")
         return
-    context.user_data["jd"] = msg[:14000]
+    jd = msg[:14000]
+    context.user_data["jd"] = jd
+    save_active_jd(update.effective_user.id, jd)
     await update.message.reply_text("Job description saved. Now upload the candidate CV as a PDF or DOCX file.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    jd = context.user_data.get("jd")
+    jd = context.user_data.get("jd") or get_active_jd(update.effective_user.id)
     if not jd:
         await msg.reply_text("First send the target job description as a text message, then upload the CV.")
         return
@@ -196,6 +221,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_document(document=f, filename="Officium_Tailored_CV.pdf", caption="PDF version of your tailored CV.")
         await msg.reply_text("CV generation completed. Review dates, contact details, and every claim before submitting. No application has been submitted.")
         context.user_data.clear()
+        clear_active_jd(update.effective_user.id)
     except Exception as e:
         log.exception("CV workflow failed")
         await msg.reply_text("I couldn't complete this CV. " + str(e)[:700] + "\nPlease check the file and hosting provider logs, then try again.")
@@ -233,8 +259,17 @@ async def run_webhook():
             return web.Response(status=405)
         try:
             payload = await request.json()
+            update_id = payload.get("update_id")
+            # Acknowledge Telegram promptly; long CV generation must not make Telegram retry the same webhook update.
+            if update_id is not None:
+                seen = db.execute("SELECT 1 FROM processed_updates WHERE update_id=?", (update_id,)).fetchone()
+                if seen:
+                    return web.Response(text="ok")
+                db.execute("INSERT INTO processed_updates(update_id, processed_at) VALUES (?, ?)",
+                           (update_id, datetime.now(timezone.utc).isoformat()))
+                db.commit()
             update = Update.de_json(payload, app.bot)
-            await app.process_update(update)
+            asyncio.create_task(app.process_update(update))
             return web.Response(text="ok")
         except Exception:
             log.exception("Failed to process Telegram webhook update")
