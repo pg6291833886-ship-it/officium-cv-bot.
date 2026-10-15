@@ -1,0 +1,31 @@
+services:
+  - type: worker
+    name: officium-cv-bot
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    autoDeployTrigger: commit
+    disk:
+      name: officium-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: DATABASE_PATH
+        value: /data/officium_bot.sqlite3
+      - key: OUTPUT_DIR
+        value: /data/generated
+      - key: AUTO_QUALITY_REPAIR
+        value: "true"
+      - key: BATCH_LIMIT
+        value: "25"
