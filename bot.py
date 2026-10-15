@@ -15,6 +15,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib import colors
 from xml.sax.saxutils import escape
+from aiohttp import web
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -181,19 +182,62 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Commands: /start begins a CV workflow; /cancel clears the current workflow; /help shows this message. Send a job description first, then upload a PDF/DOCX CV.")
 
-def main():
-    if not TOKEN:
-        raise SystemExit("TELEGRAM_BOT_TOKEN is missing. Configure it in the hosting service environment; never commit it to GitHub.")
-    if not OPENAI_KEY and not GEMINI_KEY:
-        log.warning("No AI provider key configured. Bot can start, but CV generation will fail until a provider key is added.")
+def build_application():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    log.info("Starting Officium CV Bot polling process")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    return app
+
+async def run_webhook():
+    external_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if not external_url:
+        raise SystemExit("RENDER_EXTERNAL_URL is missing for webhook mode.")
+    app = build_application()
+    await app.initialize()
+    await app.start()
+
+    async def telegram_webhook(request):
+        if request.method != "POST":
+            return web.Response(status=405)
+        try:
+            payload = await request.json()
+            update = Update.de_json(payload, app.bot)
+            await app.process_update(update)
+            return web.Response(text="ok")
+        except Exception:
+            log.exception("Failed to process Telegram webhook update")
+            return web.Response(status=400, text="invalid update")
+
+    server = web.Application(client_max_size=16 * 1024 * 1024)
+    server.router.add_post("/telegram", telegram_webhook)
+    runner = web.AppRunner(server)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "10000")))
+    await site.start()
+    await app.bot.set_webhook(f"{external_url}/telegram")
+    log.info("Officium CV Bot webhook server is running")
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await app.bot.delete_webhook()
+        await runner.cleanup()
+        await app.stop()
+        await app.shutdown()
+
+def main():
+    if not TOKEN:
+        raise SystemExit("TELEGRAM_BOT_TOKEN is missing. Configure it in hosting environment settings; never commit it to GitHub.")
+    if not OPENAI_KEY and not GEMINI_KEY:
+        log.warning("No AI provider key configured. Bot can start, but CV generation will fail until a provider key is added.")
+    if os.getenv("RENDER_EXTERNAL_URL"):
+        asyncio.run(run_webhook())
+    else:
+        app = build_application()
+        log.info("Starting Officium CV Bot polling process")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
