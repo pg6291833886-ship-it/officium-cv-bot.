@@ -161,6 +161,8 @@ def write_pdf(text: str, path: Path):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
+    if update.effective_user:
+        clear_active_jd(update.effective_user.id)
     await update.message.reply_text(
         "Welcome to Officium CV Bot.\n\n1) Send the full job description as a text message.\n"
         "2) Then upload your current CV as PDF or DOCX.\n3) I will create a tailored CV in PDF and DOCX.\n\n"
