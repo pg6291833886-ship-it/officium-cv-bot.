@@ -161,9 +161,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         docx_path, pdf_path = Path(str(base)+".docx"), Path(str(base)+".pdf")
         write_docx(cv_text, docx_path)
         write_pdf(cv_text, pdf_path)
-        db.execute("INSERT INTO cv_jobs(user_id,created_at,filename,jd,status,output_docx,output_pdf) VALUES(?,?,?,?,?,?,?)",
-                   (msg.from_user.id, datetime.now(timezone.utc).isoformat(), safe_name, jd[:2000], "generated", str(docx_path), str(pdf_path)))
-        db.commit()
+        # Privacy-first mode: do not store CV/job-description history in SQLite.
         with open(docx_path, "rb") as f:
             await msg.reply_document(document=f, filename="Officium_Tailored_CV.docx", caption="Editable tailored CV (DOCX). Please review every detail before using.")
         with open(pdf_path, "rb") as f:
@@ -174,10 +172,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.exception("CV workflow failed")
         await msg.reply_text("I couldn't complete this CV. " + str(e)[:700] + "\nPlease check the file and hosting provider logs, then try again.")
     finally:
-        try:
-            source_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        # Remove uploaded and generated files after delivery/processing to prevent storage growth.
+        for cleanup_path in (source_path, locals().get("docx_path"), locals().get("pdf_path")):
+            try:
+                if cleanup_path:
+                    Path(cleanup_path).unlink(missing_ok=True)
+            except Exception:
+                log.warning("Could not remove temporary file: %s", cleanup_path)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Commands: /start begins a CV workflow; /cancel clears the current workflow; /help shows this message. Send a job description first, then upload a PDF/DOCX CV.")
