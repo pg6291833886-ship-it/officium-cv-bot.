@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+officium_bot.sqlite3
+*.sqlite3
+*.db
+generated/
+/data/
+.DS_Store
