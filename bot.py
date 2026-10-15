@@ -72,7 +72,7 @@ def extract_text(path: Path) -> str:
 
 async def create_cv(source: str, jd: str) -> str:
     prompt = f"""You are a careful professional CV writer. Tailor the candidate CV to the target job description.
-Rules: use ONLY facts supported by the source CV; never invent employers, dates, degrees, skills, certifications, tools, metrics or achievements. Do not claim a guaranteed ATS score. Use a clean, ATS-friendly single-column layout. Keep contact details as found in source. Clearly prioritize relevant real experience and keywords from the job description, without keyword stuffing. Return only the finished CV text with clear section headings.
+Rules: use ONLY facts supported by the source CV; never invent employers, dates, degrees, skills, certifications, tools, metrics or achievements. DATE HANDLING IS IMPORTANT: do not reject the CV or mark it incomplete just because an employment date lacks a year. Preserve dates exactly as supported by the source. If only months are provided, keep month-only dates (for example, May–September). If only years are provided, keep year-only dates. If both month and year are provided, keep both. Never guess or add a missing year. A partial date is acceptable and must not trigger a validation failure. Do not claim a guaranteed ATS score. Use a clean, ATS-friendly single-column layout. Keep contact details as found in source. Clearly prioritize relevant real experience and keywords from the job description, without keyword stuffing. Return only the finished CV text with clear section headings.
 
 SOURCE CV:
 {source[:24000]}
