@@ -17,7 +17,7 @@ services:
       - key: OPENAI_MODEL
         value: gpt-4.1-mini
       - key: GEMINI_MODEL
-        value: gemini-2.5-flash
+        value: gemini-3.8-flash
       - key: DATABASE_PATH
         value: /tmp/officium_bot.sqlite3
       - key: OUTPUT_DIR
