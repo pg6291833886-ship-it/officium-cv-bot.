@@ -211,19 +211,41 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", doc.file_name or "candidate.docx")[:100]
     source_path = OUT_DIR / f"{msg.from_user.id}_{stamp}_{safe_name}"
+    stage = "connecting to Telegram to download the uploaded CV"
     try:
-        tg_file = await context.bot.get_file(doc.file_id)
-        await tg_file.download_to_drive(custom_path=str(source_path))
+        # Transient outbound network failures can happen on free hosting. Retry the Telegram
+        # file download before failing the user's CV workflow.
+        tg_file = None
+        for attempt in range(3):
+            try:
+                tg_file = await context.bot.get_file(doc.file_id)
+                await tg_file.download_to_drive(custom_path=str(source_path))
+                break
+            except Exception as network_exc:
+                error_name = type(network_exc).__name__.lower()
+                error_text = str(network_exc).lower()
+                is_connection_error = any(term in error_name + " " + error_text for term in (
+                    "connecterror", "timeoutexception", "networkerror", "temporarily unavailable"
+                ))
+                if not is_connection_error or attempt == 2:
+                    raise
+                log.warning("Telegram CV download connection failed (attempt %s/3); retrying", attempt + 1)
+                await asyncio.sleep(2 ** (attempt + 1))
+
+        stage = "extracting text from the uploaded CV"
         source_text = extract_text(source_path)
         if len(source_text.strip()) < 80:
             raise ValueError("I could not extract enough text. If this is a scanned PDF, please upload a text-based PDF or DOCX.")
+        stage = "generating the tailored CV with the configured AI provider"
         cv_text = await create_cv(source_text, jd)
         if len(cv_text) < 100:
             raise RuntimeError("The AI provider returned an empty or incomplete CV. Please retry.")
+        stage = "creating the PDF and DOCX files"
         base = OUT_DIR / f"{msg.from_user.id}_{stamp}_tailored_cv"
         docx_path, pdf_path = Path(str(base)+".docx"), Path(str(base)+".pdf")
         write_docx(cv_text, docx_path)
         write_pdf(cv_text, pdf_path)
+        stage = "sending the generated CV files back to Telegram"
         # Privacy-first mode: do not store CV/job-description history in SQLite.
         with open(docx_path, "rb") as f:
             await msg.reply_document(document=f, filename="Officium_Tailored_CV.docx", caption="Editable tailored CV (DOCX). Please review every detail before using.")
@@ -234,7 +256,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_active_jd(update.effective_user.id)
     except Exception as e:
         log.exception("CV workflow failed")
-        await msg.reply_text("I couldn't complete this CV. " + str(e)[:700] + "\nPlease check the file and hosting provider logs, then try again.")
+        error_name = type(e).__name__
+        error_detail = str(e).strip() or "(the network library returned no additional details)"
+        log.error("CV workflow failed during stage '%s' (%s): %s", stage, error_name, error_detail)
+        await msg.reply_text(
+            f"I couldn't complete this CV while {stage}. "
+            f"Error: {error_name}: {error_detail[:500]}\n"
+            "Your job description is saved. You can upload the CV again to retry."
+        )
     finally:
         # Remove uploaded and generated files after delivery/processing to prevent storage growth.
         for cleanup_path in (source_path, locals().get("docx_path"), locals().get("pdf_path")):
