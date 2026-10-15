@@ -264,6 +264,22 @@ async def run_webhook():
     await app.initialize()
     await app.start()
 
+    # Process Telegram updates sequentially. If CV and JD updates are handled concurrently,
+    # the CV handler can run first and incorrectly claim that no job description was saved.
+    update_queue = asyncio.Queue()
+
+    async def update_worker():
+        while True:
+            update = await update_queue.get()
+            try:
+                await app.process_update(update)
+            except Exception:
+                log.exception("Queued Telegram update processing failed")
+            finally:
+                update_queue.task_done()
+
+    worker_task = asyncio.create_task(update_worker())
+
     async def telegram_webhook(request):
         if request.method != "POST":
             return web.Response(status=405)
@@ -279,7 +295,7 @@ async def run_webhook():
                            (update_id, datetime.now(timezone.utc).isoformat()))
                 db.commit()
             update = Update.de_json(payload, app.bot)
-            asyncio.create_task(app.process_update(update))
+            await update_queue.put(update)
             return web.Response(text="ok")
         except Exception:
             log.exception("Failed to process Telegram webhook update")
@@ -292,12 +308,17 @@ async def run_webhook():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "10000")))
     await site.start()
-    await app.bot.set_webhook(f"{external_url}/telegram")
-    log.info("Officium CV Bot webhook server is running")
+    await app.bot.set_webhook(f"{external_url}/telegram", max_connections=1)
+    log.info("Officium CV Bot webhook server is running with sequential update processing")
     try:
         await asyncio.Event().wait()
     finally:
         await app.bot.delete_webhook()
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
         await runner.cleanup()
         await app.stop()
         await app.shutdown()
