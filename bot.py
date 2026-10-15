@@ -80,17 +80,26 @@ SOURCE CV:
 TARGET JOB DESCRIPTION:
 {jd[:14000]}
 """
+    provider_errors = []
+    # Try OpenAI first when configured, but do not let a broken/quota-limited key block Gemini fallback.
     if OPENAI_KEY:
-        client = AsyncOpenAI(api_key=OPENAI_KEY)
-        response = await client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role":"system","content":"You are a meticulous CV editor. Accuracy over embellishment."},
-                      {"role":"user","content":prompt}],
-            temperature=0.2)
-        return (response.choices[0].message.content or "").strip()
+        try:
+            client = AsyncOpenAI(api_key=OPENAI_KEY)
+            response = await client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[{"role":"system","content":"You are a meticulous CV editor. Accuracy over embellishment."},
+                          {"role":"user","content":prompt}],
+                temperature=0.2)
+            text_result = (response.choices[0].message.content or "").strip()
+            if text_result:
+                return text_result
+            provider_errors.append("OpenAI returned an empty response.")
+        except Exception as exc:
+            log.exception("OpenAI CV generation failed; trying Gemini if configured")
+            provider_errors.append("OpenAI: " + str(exc)[:220])
     if GEMINI_KEY:
         client = genai.Client(api_key=GEMINI_KEY)
-        # Retry temporary overloads, then fall back to a cost-efficient stable model.
+        # Stable model IDs documented by Google; try lower-cost model first after the primary.
         models_to_try = list(dict.fromkeys([GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.6-flash"]))
         last_error = None
         for model_name in models_to_try:
@@ -108,16 +117,15 @@ TARGET JOB DESCRIPTION:
                 except Exception as exc:
                     last_error = exc
                     error_text = str(exc).lower()
-                    is_temporary = any(term in error_text for term in ("503", "unavailable", "429", "resource_exhausted", "high demand", "temporarily"))
+                    is_temporary = any(term in error_text for term in ("503", "unavailable", "429", "resource_exhausted", "high demand", "temporarily", "quota", "rate limit"))
                     if not is_temporary:
                         break
                     if attempt < 2:
                         await asyncio.sleep(2 ** (attempt + 1))
-        raise RuntimeError(
-            "Gemini is temporarily busy or unavailable across the configured fallback models. "
-            "Please retry in a few minutes. Details: " + str(last_error)[:350]
-        )
-    raise RuntimeError("No AI provider is configured. Add OPENAI_API_KEY or GEMINI_API_KEY in hosting environment settings.")
+        provider_errors.append("Gemini: " + str(last_error)[:300])
+    if provider_errors:
+        raise RuntimeError("CV generation failed for the configured AI provider(s). " + " | ".join(provider_errors))
+    raise RuntimeError("No AI provider is configured. Add a valid GEMINI_API_KEY or OPENAI_API_KEY in hosting environment settings.")
 
 def write_docx(text: str, path: Path):
     d = Document()
