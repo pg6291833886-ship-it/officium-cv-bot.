@@ -69,8 +69,33 @@ TARGET JOB DESCRIPTION:
         return (response.choices[0].message.content or "").strip()
     if GEMINI_KEY:
         client = genai.Client(api_key=GEMINI_KEY)
-        result = await asyncio.to_thread(client.models.generate_content, model=GEMINI_MODEL, contents=prompt)
-        return (getattr(result, "text", "") or "").strip()
+        # Retry temporary overloads, then fall back to a cost-efficient stable model.
+        models_to_try = list(dict.fromkeys([GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.6-flash"]))
+        last_error = None
+        for model_name in models_to_try:
+            for attempt in range(3):
+                try:
+                    result = await asyncio.to_thread(
+                        client.models.generate_content,
+                        model=model_name,
+                        contents=prompt
+                    )
+                    text_result = (getattr(result, "text", "") or "").strip()
+                    if text_result:
+                        return text_result
+                    raise RuntimeError("Gemini returned an empty response.")
+                except Exception as exc:
+                    last_error = exc
+                    error_text = str(exc).lower()
+                    is_temporary = any(term in error_text for term in ("503", "unavailable", "429", "resource_exhausted", "high demand", "temporarily"))
+                    if not is_temporary:
+                        break
+                    if attempt < 2:
+                        await asyncio.sleep(2 ** (attempt + 1))
+        raise RuntimeError(
+            "Gemini is temporarily busy or unavailable across the configured fallback models. "
+            "Please retry in a few minutes. Details: " + str(last_error)[:350]
+        )
     raise RuntimeError("No AI provider is configured. Add OPENAI_API_KEY or GEMINI_API_KEY in hosting environment settings.")
 
 def write_docx(text: str, path: Path):
